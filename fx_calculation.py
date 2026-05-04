@@ -629,3 +629,133 @@ def reject_outliers(ch_names_ts, time_series, abs_clip=1000, plot=True):
         plt.show()
 
     return bads
+
+
+
+
+
+
+def mni2fsav_coords(mni_coords, fname_affine, fname_warp, dir_tmp='/tmp'):
+    '''
+    mni_coords = pandas (n_coords, 3) [x_norm_mri, y_norm_mri, z_norm_mri]
+    fname_affine = *0GenericAffine.mat
+    fname_warp = *1InverseWarp.nii.gz
+    '''
+    import mne
+    import os.path as op
+    import pandas as pd
+    from nipype.interfaces.ants import ApplyTransformsToPoints
+
+    coords_lps = mni_coords.copy()
+    coords_lps['x_norm_mri'] *= -1
+    coords_lps['y_norm_mri'] *= -1
+
+    fname_lps = op.join(dir_tmp, 'tmp_lps_coords.csv')
+    coords_lps[['x_norm_mri', 'y_norm_mri', 'z_norm_mri']].to_csv(fname_lps, index=False)
+
+    fname_lps_norm = op.join(dir_tmp, 'tmp_lps_coords_norm.csv')
+
+    at = ApplyTransformsToPoints()
+    at.inputs.dimension = 3
+    at.inputs.input_file = fname_lps
+    at.inputs.output_file = fname_lps_norm
+    at.inputs.transforms = [fname_affine, fname_warp]
+    at.inputs.invert_transform_flags = [True, False]
+    # at.cmdline
+    at.run()
+
+    coords_lps_norm = pd.read_csv(fname_lps_norm)
+    coords_ras_norm = coords_lps_norm.copy()
+    coords_ras_norm['x_norm_mri'] *= -1
+    coords_ras_norm['y_norm_mri'] *= -1
+    coords_ras_norm.rename(columns={'x_norm_mri': 'x_norm_fsav', 'y_norm_mri': 'y_norm_fsav', 'z_norm_mri': 'z_norm_fsav'}, inplace=True)
+
+    return coords_ras_norm
+
+
+
+
+
+
+def map_annot(coords, subjects_dir, kind='lobe'):
+    """
+    Find the corresponding annotation (lobe or yeo) of a set of electrode coordinates.
+
+    Parameters
+    ----------
+    coords: pandas.DataFrame
+        The dataframe with the electrode coordinates
+    subjects_dir: str
+        Freesurfer's subjects dir
+    kind: str
+        Annotation type (lobe or yeo)
+    plot: Bool
+        Whether or not to plot the surface and the electrodes (color-coded by lobe)
+
+    Returns
+    -------
+    lobes_df: pandas.DataFrame
+        A dataframe with electrode names and corresponding lobes.
+
+    """
+
+    import mne
+    import pandas as pd
+    import os.path as op
+    import numpy as np
+    from nibabel.freesurfer import read_annot
+
+    subject = 'mni152'
+
+    if kind == 'lobe':
+        fname_annot = op.join(subjects_dir, subject, 'label', '%s.lobes_file.annot')
+    elif kind == 'yeo':
+        fname_annot = op.join(subjects_dir, subject, 'label', '%s.Yeo2011_7Networks_N1000.annot')
+    elif kind == 'glasser':
+        fname_annot = op.join(subjects_dir, subject, 'label', '%s.glasser.annot')
+    elif kind == 'destrieux':
+        fname_annot = op.join(subjects_dir, subject, 'label', '%s.aparc.a2009s.annot')
+    elif kind == 'desikan':
+            fname_annot = op.join(subjects_dir, subject, 'label', '%s.aparc.annot')
+    else:
+        print('Unknown Annotation')
+        return
+
+    labels = {h: mne.read_labels_from_annot(annot_fname=fname_annot % h, subjects_dir=
+                                            subjects_dir, subject=subject) for h in ['rh', 'lh']}
+
+    annot = {h: read_annot(fname_annot % h) for h in ['rh', 'lh']}
+
+    fname_surf = op.join(subjects_dir, subject, 'surf', '%s.pial')
+    surfs = {h: mne.read_surface(fname_surf % h) for h in ['rh', 'lh']}
+
+    names = []
+    lobes = []
+    codes = []
+
+    for ix, r in coords.iterrows():
+        print(r['name'])
+        pos = r[['x_norm_surf', 'y_norm_surf', 'z_norm_surf']].tolist()
+        if any(np.isnan(pos)):
+            print('NaN Found - Aborting')
+            return 'NaN Found'
+        hemi = 'rh' if pos[0] > 0 else 'lh'
+        dist_all = np.sqrt(np.sum((surfs[hemi][0] - pos) ** 2, axis=1))
+
+        # lobe_code = annot[hemi][0][dist_all.argmin()]
+        min_ind = -1
+        lobe_code = -1
+        while lobe_code == -1:
+            min_ind += 1
+            lobe_code = annot[hemi][0][np.argpartition(dist_all, min_ind)[min_ind]]
+
+        codes.append(lobe_code)
+        lobes.append(annot[hemi][2][lobe_code].decode('utf-8'))
+        names.append(r['name'])
+
+    lobes_df = pd.DataFrame({'name': names, kind: lobes})
+
+    coords[kind] = lobes
+    colors = {k.decode('utf-8'): tuple(annot['rh'][1][c, :3]/256) for c, k in enumerate(annot['rh'][2])}
+
+    return lobes_df
