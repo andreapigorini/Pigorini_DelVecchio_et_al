@@ -1,6 +1,5 @@
 from pymatreader import read_mat
 import os
-from itcfpy.process import remove_stim_artifact
 from itcfpy.spatial import make_bip_lists, mni2fsav_coords
 from scipy.stats import ttest_ind
 from scipy import stats
@@ -759,3 +758,682 @@ def map_annot(coords, subjects_dir, kind='lobe'):
     colors = {k.decode('utf-8'): tuple(annot['rh'][1][c, :3]/256) for c, k in enumerate(annot['rh'][2])}
 
     return lobes_df
+
+
+
+
+
+
+def print_results(stats_dict, all_subj_coords, all_subj_coords_plot_ez, label_map,
+                  name="", correction='fdr', plot=False, printt=True):
+    """
+    Summarize responsive contacts across modalities and cortical lobes.
+
+    This function computes the number and percentage of responsive gray-matter contacts
+    for each sensory modality, after excluding contacts located in the seizure-onset zone
+    and contacts rejected as outliers. It also reports cross-modal overlaps and provides
+    a lobe-wise breakdown of responsiveness. Optionally, it plots the percentage of
+    responsive contacts per lobe and modality.
+
+    Parameters
+    ----------
+    stats_dict : dict
+        Dictionary containing one statistical dataframe per modality.
+    all_subj_coords : pandas.DataFrame
+        Contact-level dataframe after exclusion of pathological/artifactual contacts.
+        Must contain unique_ch_names and lobe columns.
+    all_subj_coords_plot_ez : pandas.DataFrame
+        Contact-level dataframe before final exclusions, including gray-matter contacts
+        and, when available, seizure-onset-zone information.
+    label_map : dict
+        Dictionary mapping modality names to display labels.
+    name : str, optional
+        Analysis label used in printed outputs and plot titles.
+    correction : str, optional
+        Column name used to define statistical significance.
+    plot : bool, optional
+        Whether to plot lobe-wise responsiveness.
+    printt : bool, optional
+        Whether to print summary tables.
+
+    Returns
+    -------
+    summary_df : pandas.DataFrame
+        Summary table with overall responsiveness and cross-modal overlaps.
+    lobe_df : pandas.DataFrame
+        Lobe-wise table reporting responsive and total contacts per modality.
+    A : set
+        Set of acoustic responsive contacts.
+    S : set
+        Set of somatosensory responsive contacts.
+    V : set
+        Set of visual responsive contacts.
+    """
+
+    # Keep modalities in a fixed order when available.
+    ordered = [c for c in ['acoustic', 'somatosensory', 'visual'] if c in stats_dict]
+
+    def _mk_uid(df, subj_col='subj', ch_col='ch_names'):
+        """
+        Create subject-specific contact identifiers.
+        """
+
+        if ch_col not in df.columns and 'ch_name' in df.columns:
+            ch_col = 'ch_name'
+
+        return df[subj_col].astype(str) + '_' + df[ch_col].astype(str)
+
+    # Define the initial gray-matter denominator.
+    gm_df = all_subj_coords_plot_ez[['subj', 'ch_name']].drop_duplicates().copy()
+    uids_gm = set((gm_df['subj'].astype(str) + '_' + gm_df['ch_name'].astype(str)).tolist())
+
+    # Identify contacts belonging to the seizure-onset zone, when available.
+    if 'ez' in all_subj_coords_plot_ez.columns:
+        soz_df = all_subj_coords_plot_ez.loc[
+            all_subj_coords_plot_ez['ez'] == 1,
+            ['subj', 'ch_name']
+        ].drop_duplicates()
+
+        uids_soz = set(
+            (soz_df['subj'].astype(str) + '_' + soz_df['ch_name'].astype(str)).tolist()
+        ) & uids_gm
+    else:
+        uids_soz = set()
+
+    # Identify outlier contacts as gray-matter contacts absent from the final coordinate table.
+    uids_after = set(all_subj_coords['unique_ch_names'].astype(str).tolist())
+    uids_outliers = (uids_gm - uids_soz) - uids_after
+
+    # Final denominator: gray-matter contacts excluding seizure-onset-zone contacts and outliers.
+    uids_den = uids_gm - (uids_soz | uids_outliers)
+    n_den = len(uids_den)
+
+    def _corr_mask(df):
+        """
+        Return a boolean significance mask from either binary or p-value columns.
+        """
+
+        if correction not in df.columns:
+            raise KeyError(f"Column '{correction}' not found in dataframe.")
+
+        s = pd.to_numeric(df[correction], errors='coerce')
+        vals = set(s.dropna().unique().tolist())
+
+        if vals.issubset({0, 1}) and len(vals) > 0:
+            return s.astype(bool).to_numpy()
+
+        return (s < 0.05).to_numpy()
+
+    # Build modality-specific sets of responsive contacts.
+    resp_sets = {}
+
+    for cond in ordered:
+        df = stats_dict[cond].copy()
+
+        if 'ch_names' not in df.columns and 'ch_name' in df.columns:
+            df = df.rename(columns={'ch_name': 'ch_names'})
+
+        mask = _corr_mask(df)
+        df_resp = df.loc[mask, ['subj', 'ch_names']].copy()
+        uids_resp = set(_mk_uid(df_resp).tolist()) if len(df_resp) else set()
+
+        # Restrict responsive contacts to the final denominator.
+        resp_sets[cond] = uids_resp & uids_den
+
+    def _pct(n, den):
+        """
+        Compute percentage while avoiding division by zero.
+        """
+
+        return (n / den * 100.0) if den > 0 else 0.0
+
+    # Build overall summary table.
+    rows = []
+    rows.append(['Denominator (GM − SOZ − outliers)', n_den, '100.00'])
+
+    any_count = len(set().union(*resp_sets.values())) if resp_sets else 0
+    rows.append(['Any responding contact (any modality)', any_count, f"{_pct(any_count, n_den):.2f}"])
+
+    for cond in ordered:
+        n_mod = len(resp_sets[cond])
+        rows.append([label_map.get(cond, cond), n_mod, f"{_pct(n_mod, n_den):.2f}"])
+
+    # Compute lobe-wise responsiveness.
+    lobe_summary = []
+
+    df_lobes = all_subj_coords[['unique_ch_names', 'lobe']].drop_duplicates().copy()
+    df_lobes = df_lobes[df_lobes['unique_ch_names'].isin(uids_den)]
+
+    for cond in ordered:
+        resp = resp_sets[cond]
+
+        for lobe, group in df_lobes.groupby('lobe'):
+            uids_lobe = set(group['unique_ch_names'])
+            n_lobe = len(uids_lobe)
+            n_resp = len(uids_lobe & resp)
+            pct = _pct(n_resp, n_lobe)
+
+            lobe_summary.append([cond, lobe, n_resp, n_lobe, f"{pct:.2f}"])
+
+    lobe_df = pd.DataFrame(
+        lobe_summary,
+        columns=['Modality', 'Lobe', 'n_resp', 'n_total', '%']
+    )
+
+    # Compute cross-modal overlaps.
+    A = resp_sets.get('acoustic', set())
+    S = resp_sets.get('somatosensory', set())
+    V = resp_sets.get('visual', set())
+
+    if len(A) and len(S):
+        rows.append(['Overlap A∩S', len(A & S), f"{_pct(len(A & S), n_den):.2f}"])
+
+    if len(A) and len(V):
+        rows.append(['Overlap A∩V', len(A & V), f"{_pct(len(A & V), n_den):.2f}"])
+
+    if len(S) and len(V):
+        rows.append(['Overlap S∩V', len(S & V), f"{_pct(len(S & V), n_den):.2f}"])
+
+    if len(A) and len(S) and len(V):
+        rows.append(['Overlap A∩S∩V', len(A & S & V), f"{_pct(len(A & S & V), n_den):.2f}"])
+
+    summary_df = pd.DataFrame(
+        rows,
+        columns=['Item', 'n', '% of contacts in grey matter']
+    )
+
+    # Print summary tables.
+    if printt:
+        print(f"\nSummary of responsive contacts — {name}:")
+        print(summary_df.to_string(index=False))
+
+        print("\nBreakdown per lobe:")
+        print(lobe_df.to_string(index=False))
+
+    # Optionally plot lobe-wise responsiveness for each modality.
+    if plot:
+        sns.set(style='whitegrid')
+        fig, axes = plt.subplots(1, len(ordered), figsize=(15, 5), sharey=True)
+
+        palette = {
+            'occipital': 'blue',
+            'parietal': 'red',
+            'temporal': 'green',
+            'frontal': 'black',
+            'insula': 'yellow',
+            'cingulate': 'magenta'
+        }
+
+        for i, cond in enumerate(ordered):
+            ax = axes[i]
+            dfp = lobe_df[lobe_df['Modality'] == cond]
+
+            sns.barplot(
+                data=dfp,
+                x='Lobe',
+                y=dfp['%'].astype(float),
+                ax=ax,
+                palette=palette
+            )
+
+            ax.set_title(label_map.get(cond, cond), fontsize=12)
+            ax.set_ylabel('% responsive' if i == 0 else "")
+            ax.set_xlabel('Lobe')
+            ax.set_ylim(0, 100)
+            ax.tick_params(axis='x', rotation=45)
+
+        plt.suptitle(f"Percentage of responsive contacts per lobe — {name}", fontsize=14)
+        plt.tight_layout()
+        plt.show()
+
+    return summary_df, lobe_df, A, S, V
+
+
+
+
+
+
+def print_stats_per_area(stats_dict, all_subj_coords, all_subj_coords_plot_ez,
+                         label_map, name="", correction='fdr_sig'):
+    """
+    Compute area-wise counts and percentages of responsive contacts for each modality.
+
+    This function summarizes responsiveness at the anatomical-area level. For each
+    cortical area, it reports the total number of valid gray-matter contacts and the
+    number and percentage of contacts responding to each available sensory modality.
+    The denominator excludes seizure-onset-zone contacts and outliers, consistently
+    with the global responsiveness summaries.
+
+    Parameters
+    ----------
+    stats_dict : dict
+        Dictionary containing one statistical dataframe per modality.
+    all_subj_coords : pandas.DataFrame
+        Contact-level dataframe after exclusion of pathological/artifactual contacts.
+        Must contain unique_ch_names and area columns.
+    all_subj_coords_plot_ez : pandas.DataFrame
+        Contact-level dataframe before final exclusions, including gray-matter contacts
+        and, when available, seizure-onset-zone information.
+    label_map : dict
+        Dictionary mapping modality names to display labels.
+    name : str, optional
+        Analysis label used in printed output.
+    correction : str, optional
+        Column name used to define statistical significance.
+
+    Returns
+    -------
+    area_table : pandas.DataFrame
+        Area-wise table containing total contacts and responsive contacts per modality.
+    """
+
+    # Keep modalities in a fixed order when available.
+    ordered = [c for c in ['acoustic', 'somatosensory', 'visual'] if c in stats_dict]
+
+    def _mk_uid(df, subj_col='subj', ch_col='ch_names'):
+        """
+        Create subject-specific contact identifiers.
+        """
+
+        if ch_col not in df.columns and 'ch_name' in df.columns:
+            ch_col = 'ch_name'
+
+        return df[subj_col].astype(str) + '_' + df[ch_col].astype(str)
+
+    # Define the initial gray-matter contact set.
+    gm_df__ = all_subj_coords_plot_ez[['subj', 'ch_name']].drop_duplicates().copy()
+    uids_gm__ = set((gm_df__['subj'].astype(str) + '_' + gm_df__['ch_name'].astype(str)).tolist())
+
+    # Identify seizure-onset-zone contacts when available.
+    if 'ez' in all_subj_coords_plot_ez.columns:
+        soz_df__ = all_subj_coords_plot_ez.loc[
+            all_subj_coords_plot_ez['ez'] == 1,
+            ['subj', 'ch_name']
+        ].drop_duplicates()
+
+        uids_soz__ = set(
+            (soz_df__['subj'].astype(str) + '_' + soz_df__['ch_name'].astype(str)).tolist()
+        ) & uids_gm__
+
+    else:
+        uids_soz__ = set()
+
+    # Identify outlier contacts as gray-matter contacts absent from the final table.
+    uids_after__ = set(all_subj_coords['unique_ch_names'].astype(str).tolist())
+    uids_outliers__ = (uids_gm__ - uids_soz__) - uids_after__
+
+    # Final denominator: gray-matter contacts excluding seizure-onset-zone contacts and outliers.
+    uids_den = uids_gm__ - (uids_soz__ | uids_outliers__)
+
+    def _sig_mask(df):
+        """
+        Return a boolean significance mask from either binary or p-value columns.
+        """
+
+        col = correction
+        s = pd.to_numeric(df[col], errors='coerce')
+        vals = set(s.dropna().unique().tolist())
+
+        if vals.issubset({0, 1}) and len(vals) > 0:
+            return s.astype(bool).to_numpy()
+
+        return (s < 0.05).to_numpy()
+
+    # Build modality-specific sets of responsive contacts.
+    resp_sets = {}
+
+    for cond in ordered:
+        df = stats_dict[cond].copy()
+
+        if 'ch_names' not in df.columns and 'ch_name' in df.columns:
+            df = df.rename(columns={'ch_name': 'ch_names'})
+
+        mask = _sig_mask(df)
+        df_resp = df.loc[mask, ['subj', 'ch_names']].copy()
+        uids_resp = set(_mk_uid(df_resp).tolist()) if len(df_resp) else set()
+
+        # Restrict responsive contacts to the final denominator.
+        resp_sets[cond] = uids_resp & uids_den
+
+    # Ensure that a unique contact identifier is available.
+    if 'unique_ch_names' not in all_subj_coords.columns:
+        all_subj_coords = all_subj_coords.copy()
+        all_subj_coords['unique_ch_names'] = (
+            all_subj_coords['subj'].astype(str) + '_' +
+            all_subj_coords['ch_name'].astype(str)
+        )
+
+    # Map contacts to anatomical areas.
+    map_area = all_subj_coords[['unique_ch_names', 'area']].drop_duplicates()
+
+    # Compute the total number of valid contacts per area.
+    den_df = pd.DataFrame({'unique_ch_names': list(uids_den)}).merge(
+        map_area,
+        on='unique_ch_names',
+        how='left'
+    )
+
+    area_tot = (
+        den_df['area']
+        .value_counts()
+        .rename_axis('Area')
+        .rename('N in area')
+        .reset_index()
+    )
+
+    def _area_counts_for(uids):
+        """
+        Count responsive contacts per anatomical area.
+        """
+
+        if not uids:
+            return pd.Series(dtype=int)
+
+        df_u = pd.DataFrame({'unique_ch_names': list(uids)})
+
+        return (
+            df_u
+            .merge(map_area, on='unique_ch_names', how='left')['area']
+            .value_counts()
+        )
+
+    # Count responsive contacts per area and modality.
+    cnt_by_mod = {}
+
+    for cond in ordered:
+        cnt_by_mod[cond] = _area_counts_for(resp_sets[cond]).rename(label_map[cond])
+
+    # Merge total contacts and modality-specific responsive counts.
+    area_table = area_tot.copy()
+
+    for cond in ordered:
+        area_table = area_table.merge(
+            cnt_by_mod[cond],
+            left_on='Area',
+            right_index=True,
+            how='left'
+        )
+
+    # Add percentages of responsive contacts within each area.
+    for cond in ordered:
+        col_n = label_map[cond]
+
+        if col_n not in area_table.columns:
+            area_table[col_n] = 0
+
+        area_table[col_n] = area_table[col_n].fillna(0).astype(int)
+
+        area_table[f'{label_map[cond]} %'] = np.where(
+            area_table['N in area'] > 0,
+            (area_table[col_n] / area_table['N in area'] * 100).round(2),
+            0.00
+        ).astype(float)
+
+    # Reorder columns for readability.
+    cols = ['Area', 'N in area']
+
+    for cond in ordered:
+        lab = label_map[cond]
+
+        if lab not in area_table.columns:
+            area_table[lab] = 0
+            area_table[f'{lab} %'] = 0.00
+
+        cols += [lab, f'{lab} %']
+
+    area_table = area_table[cols]
+    area_table = area_table.sort_values(by=['Area']).reset_index(drop=True)
+
+    print(f"\nArea-wise responsive contacts by modality — {name}:")
+    print(area_table.to_string(index=False))
+
+    return area_table
+
+
+
+
+
+
+def remove_spurious_ones(sig, min_len):
+    """
+    Remove short spurious sequences of ones from a binary significance vector.
+
+    This function enforces temporal continuity by removing clusters of significant
+    samples shorter than a specified minimum duration. It is used to avoid classifying
+    isolated or very brief significant samples as valid electrophysiological responses.
+
+    Parameters
+    ----------
+    sig : array-like
+        Binary array indicating significant samples, where 1 denotes significance
+        and 0 denotes non-significance.
+    min_len : int
+        Minimum number of consecutive samples required for a significant segment
+        to be retained.
+
+    Returns
+    -------
+    sig : ndarray
+        Cleaned binary significance vector in which short significant segments
+        have been removed.
+    """
+
+    # Work on a copy to avoid modifying the input array in place.
+    sig = sig.copy()
+
+    # Track the beginning of each contiguous significant segment.
+    start = None
+
+    for i in range(len(sig)):
+
+        # Mark the start of a new significant segment.
+        if sig[i] == 1 and start is None:
+            start = i
+
+        # When the segment ends, remove it if it is shorter than min_len.
+        elif sig[i] == 0 and start is not None:
+            if i - start < min_len:
+                sig[start:i] = 0
+            start = None
+
+    # Handle a significant segment that continues until the end of the array.
+    if start is not None and len(sig) - start < min_len:
+        sig[start:] = 0
+
+    return sig
+
+
+
+
+
+
+def df_from_stats(stats, correction='fdr_sig', marg=True):
+    """
+    Build a contact-level multimodal responsiveness dataframe from modality-specific statistics.
+
+    This function merges acoustic, somatosensory, and visual responsiveness tables into
+    a single contact-level dataframe. For each contact, it stores binary or numerical
+    significance values for each modality and computes a compact multimodal code
+    indicating which combination of modalities elicited a significant response.
+    Contact coordinates in fsaverage and surface-normalized space are then appended.
+
+    Parameters
+    ----------
+    stats : dict
+        Dictionary containing modality-specific statistical dataframes.
+        Expected keys are 'acoustic', 'somatosensory', and 'visual'.
+    correction : str, optional
+        Column name used to define responsiveness for each modality.
+    marg : bool, optional
+        Whether to include the Margulies principal gradient value
+        (`PC1_margulies`) among the coordinate columns.
+
+    Returns
+    -------
+    merged : pandas.DataFrame
+        Contact-level dataframe containing modality-specific responsiveness,
+        multimodal response code, coordinates, and unique contact identifiers.
+    """
+
+    # Ensure consistent naming of the channel column across modality-specific dataframes.
+    for key in ['acoustic', 'somatosensory', 'visual']:
+        if 'ch_names' in stats[key].columns:
+            stats[key] = stats[key].rename(columns={'ch_names': 'ch_name'})
+
+    # Extract modality-specific responsiveness columns.
+    ac = stats['acoustic'][['subj', 'ch_name', correction]].rename(
+        columns={correction: 'acoustic'}
+    )
+
+    ss = stats['somatosensory'][['subj', 'ch_name', correction]].rename(
+        columns={correction: 'somatosensory'}
+    )
+
+    vis = stats['visual'][['subj', 'ch_name', correction]].rename(
+        columns={correction: 'visual'}
+    )
+
+    # Merge acoustic, somatosensory, and visual responsiveness at the contact level.
+    merged = pd.merge(ac, ss, on=['subj', 'ch_name'], how='outer')
+    merged = pd.merge(merged, vis, on=['subj', 'ch_name'], how='outer')
+
+    # Fill missing responsiveness values and encode cross-modal response combinations.
+    # Coding scheme:
+    # 0 = no response
+    # 1 = acoustic only
+    # 2 = somatosensory only
+    # 3 = acoustic + somatosensory
+    # 4 = visual only
+    # 5 = acoustic + visual
+    # 6 = somatosensory + visual
+    # 7 = acoustic + somatosensory + visual
+    merged[['acoustic', 'somatosensory', 'visual']] = (
+        merged[['acoustic', 'somatosensory', 'visual']].fillna(0)
+    )
+
+    merged['multi'] = (
+        (merged['acoustic'] > 0).astype(int) * 1 +
+        (merged['somatosensory'] > 0).astype(int) * 2 +
+        (merged['visual'] > 0).astype(int) * 4
+    )
+
+    # Define coordinate columns to retrieve from modality-specific tables.
+    if marg is True:
+        coord_cols = [
+            'subj', 'ch_name',
+            'x_norm_surf', 'y_norm_surf', 'z_norm_surf',
+            'x_norm_fsav', 'y_norm_fsav', 'z_norm_fsav',
+            'PC1_margulies'
+        ]
+    else:
+        coord_cols = [
+            'subj', 'ch_name',
+            'x_norm_surf', 'y_norm_surf', 'z_norm_surf',
+            'x_norm_fsav', 'y_norm_fsav', 'z_norm_fsav'
+        ]
+
+    # Collect coordinates from all modality-specific dataframes.
+    ac_coords = stats['acoustic'][coord_cols]
+    ss_coords = stats['somatosensory'][coord_cols]
+    vis_coords = stats['visual'][coord_cols]
+
+    coords_all = pd.concat([ac_coords, ss_coords, vis_coords], ignore_index=True)
+
+    # Retain one coordinate entry per subject-contact pair.
+    coords_all = coords_all.drop_duplicates(subset=['subj', 'ch_name'])
+
+    # Append coordinates to the merged responsiveness dataframe.
+    merged = pd.merge(merged, coords_all, on=['subj', 'ch_name'], how='left')
+
+    # Create a subject-specific unique contact identifier.
+    merged['unique_ch_names'] = merged['subj'] + '_' + merged['ch_name']
+
+    return merged
+
+
+
+
+
+
+def remove_stim_artifact(epo, win=0.0125, size=5, plot=False, kind='spline'):
+    """
+    Attenuate stimulation artifacts around stimulus onset in epoched SEEG data.
+
+    This function replaces the signal within a short time window centered on stimulus
+    onset using either a median-filtered estimate or a spline-based interpolation.
+    A Tukey window is used to blend the corrected segment with the original signal,
+    minimizing sharp discontinuities at the edges of the artifact-correction window.
+
+    Parameters
+    ----------
+    epo : mne.Epochs
+        Epoched SEEG data aligned to stimulation onset.
+    win : float, optional
+        Half-width of the artifact-correction window in seconds.
+    size : int, optional
+        Kernel size used for median filtering.
+    plot : bool, optional
+        Whether to plot the original and corrected signal for visual inspection.
+    kind : {'median', 'spline'}, optional
+        Artifact-correction method. If 'median', the artifact window is replaced
+        with a Tukey-weighted median-filtered signal. If 'spline', the window is
+        replaced with a Tukey-weighted spline interpolation.
+
+    Returns
+    -------
+    epo : mne.Epochs
+        Epoched SEEG data after stimulation-artifact attenuation.
+    """
+
+    import numpy as np
+    from scipy.ndimage import median_filter
+    from scipy.signal.windows import tukey
+    import matplotlib.pyplot as plt
+    from scipy.interpolate import UnivariateSpline
+
+    # Access epoch data directly: trials x channels x time samples.
+    d = epo._data
+
+    # Define the time window centered on stimulation onset.
+    artifact_mask = (epo.times > 0 - win) & (epo.times < 0 + win)
+    win_times = epo.times[artifact_mask]
+
+    # Build a Tukey window and its inverse to smoothly blend corrected and original data.
+    tuk = tukey(len(win_times))
+    tuk_inv = np.abs(tuk - 1)
+
+    # Iterate across trials and channels.
+    for ix_tr, tr in enumerate(d):
+        for ix_ch, ch_dat in enumerate(tr):
+
+            # Extract the original signal inside the artifact window.
+            old_dat = ch_dat[artifact_mask]
+
+            # Estimate the artifact-corrected signal using median filtering.
+            medf_dat = median_filter(old_dat, size=size)
+            new_dat = tuk * medf_dat + tuk_inv * old_dat
+
+            # Estimate the artifact-corrected signal using spline interpolation.
+            spl = UnivariateSpline(win_times, old_dat, w=None)
+            spl_dat = tuk * spl(win_times) + tuk_inv * old_dat
+
+            # Optionally display correction diagnostics.
+            if plot:
+                plt.plot(epo.times, ch_dat)
+                plt.plot(win_times, old_dat, label='old')
+                plt.plot(win_times, medf_dat, label='median filter')
+                plt.plot(win_times, new_dat, label='median-corrected')
+                plt.plot(win_times, spl_dat, label='spline-corrected')
+                plt.legend()
+                plt.show()
+
+            # Replace the artifact window using the selected correction method.
+            if kind == 'median':
+                d[ix_tr, ix_ch, artifact_mask] = new_dat
+            elif kind == 'spline':
+                d[ix_tr, ix_ch, artifact_mask] = spl_dat
+
+    # Write corrected data back into the Epochs object.
+    epo._data = d
+
+    return epo
