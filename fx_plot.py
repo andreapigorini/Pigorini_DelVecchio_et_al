@@ -885,3 +885,568 @@ def pointplot_gamma_by_area(all_subj_coords, gamma_to_plot, variable, error='std
     plt.show()
 
     return stats
+
+
+
+
+
+
+def continuous_maps_multi(to_plot, cmap, fs_dir, distance=0.015, surface='pial_semi_inflated', th=0.2):
+    """
+    Generate a multimodal continuous fsaverage surface map.
+
+    This function projects acoustic, somatosensory, and visual contact-level
+    responsiveness values onto the fsaverage cortical surface using MNE nearest-sensor
+    interpolation. Each modality-specific map is thresholded and binarized, then combined
+    into a single categorical multimodal map encoding the spatial overlap among sensory
+    responses.
+
+    The coding scheme is:
+    0 = no response
+    1 = acoustic only
+    2 = somatosensory only
+    3 = acoustic + somatosensory
+    4 = visual only
+    5 = acoustic + visual
+    6 = somatosensory + visual
+    7 = acoustic + somatosensory + visual
+
+    Parameters
+    ----------
+    to_plot : pandas.DataFrame
+        Contact-level dataframe containing subject IDs, channel names, fsaverage
+        coordinates, and modality-specific responsiveness columns.
+        Required columns are acoustic, somatosensory, visual, x_norm_fsav,
+        y_norm_fsav, and z_norm_fsav.
+    cmap : matplotlib colormap
+        Discrete colormap used to display multimodal response categories.
+    fs_dir : str, optional
+        FreeSurfer SUBJECTS_DIR containing the fsaverage subject and source space.
+    distance : float, optional
+        Maximum distance, in meters, used for nearest-sensor interpolation.
+    surface : str, optional
+        Surface used for visualization. Typical options include 'pial_semi_inflated'
+        and 'inflated'.
+    th : float, optional
+        Threshold applied to each interpolated modality map before binarization.
+
+    Returns
+    -------
+    stc_all : mne.SourceEstimate
+        Categorical source estimate encoding unimodal, bimodal, and trimodal responses.
+    brain : mne.viz.Brain
+        MNE Brain visualization object.
+    """
+
+    # Create a subject-specific unique contact identifier.
+    to_plot.loc[:, 'unique_ch_names'] = to_plot['subj'] + '_' + to_plot['ch_name']
+
+    # Convert fsaverage coordinates from millimeters to meters for MNE.
+    ch_pos = {
+        c.unique_ch_names: c[['x_norm_fsav', 'y_norm_fsav', 'z_norm_fsav']].values / 1000
+        for ix, c in to_plot.iterrows()
+    }
+
+    # Build an MNE montage in fsaverage MRI coordinates.
+    mont = mne.channels.make_dig_montage(ch_pos, coord_frame='mri')
+    mont.add_estimated_fiducials('fsaverage')
+
+    # Create an MNE info object matching the contact montage.
+    info = mne.create_info(
+        ch_names=mont.ch_names,
+        ch_types=['seeg'] * len(mont.ch_names),
+        sfreq=1000
+    )
+    info.set_montage(mont)
+
+    # Load fsaverage source space for surface interpolation.
+    src = mne.read_source_spaces(
+        op.join(fs_dir, 'fsaverage', 'bem', "fsaverage-ico-5-src.fif")
+    )
+
+    # Project acoustic responsiveness onto the cortical surface and binarize it.
+    evo_ac = mne.EvokedArray(to_plot['acoustic'].values.reshape(-1, 1), info)
+
+    stc_ac = mne.stc_near_sensors(
+        evo_ac,
+        trans="fsaverage",
+        subject="fsaverage",
+        subjects_dir=fs_dir,
+        src=src,
+        surface="pial",
+        mode="weighted",
+        distance=distance,
+    )
+
+    stc_ac.data = np.where(stc_ac.data < th, 0, 1)
+
+    # Project somatosensory responsiveness onto the cortical surface and binarize it.
+    evo_ss = mne.EvokedArray(to_plot['somatosensory'].values.reshape(-1, 1), info)
+
+    stc_ss = mne.stc_near_sensors(
+        evo_ss,
+        trans="fsaverage",
+        subject="fsaverage",
+        subjects_dir=fs_dir,
+        src=src,
+        surface="pial",
+        mode="weighted",
+        distance=distance,
+    )
+
+    stc_ss.data = np.where(stc_ss.data < th, 0, 1)
+
+    # Project visual responsiveness onto the cortical surface and binarize it.
+    evo_vi = mne.EvokedArray(to_plot['visual'].values.reshape(-1, 1), info)
+
+    stc_vi = mne.stc_near_sensors(
+        evo_vi,
+        trans="fsaverage",
+        subject="fsaverage",
+        subjects_dir=fs_dir,
+        src=src,
+        surface="pial",
+        mode="weighted",
+        distance=distance,
+    )
+
+    stc_vi.data = np.where(stc_vi.data < th, 0, 1)
+
+    # Combine the three binary modality maps into a single categorical map.
+    combined_bin = (
+        stc_ac.data.astype(int) * 1 +
+        stc_ss.data.astype(int) * 2 +
+        stc_vi.data.astype(int) * 4
+    )
+
+    # Store the combined multimodal map as a SourceEstimate.
+    stc_all = mne.SourceEstimate(
+        combined_bin,
+        vertices=stc_ac.vertices,
+        tmin=stc_ac.tmin,
+        tstep=stc_ac.tstep,
+        subject=stc_ac.subject
+    )
+
+    # Plot on inflated surface and optionally add atlas borders.
+    if surface == 'inflated':
+        brain = stc_all.plot(
+            surface="inflated",
+            cortex='white',
+            hemi="split",
+            colormap=cmap,
+            colorbar=False,
+            clim=dict(kind="value", lims=[0, 3.5, 7]),
+            subjects_dir=fs_dir,
+            size=(500, 500),
+            smoothing_steps='nearest',
+            time_viewer=False,
+            transparent=False,
+            background='w',
+            views=['lateral', 'medial']
+        )
+
+        labels = mne.read_labels_from_annot(
+            subject='fsaverage',
+            parc='aparc',
+            hemi='both',
+            subjects_dir=fs_dir
+        )
+
+        for label in labels:
+            brain.add_label(
+                label,
+                borders=0.05,
+                color='black',
+                alpha=1
+            )
+
+    else:
+        # Plot the categorical multimodal map on the selected fsaverage surface.
+        brain = stc_all.plot(
+            surface=surface,
+            cortex='white',
+            hemi="split",
+            colormap=cmap,
+            colorbar=True,
+            clim=dict(kind="value", lims=[0, 3.5, 7]),
+            subjects_dir=fs_dir,
+            size=(500, 500),
+            smoothing_steps='nearest',
+            time_viewer=False,
+            transparent=False,
+            background='w',
+            views=['lateral', 'medial']
+        )
+
+    return stc_all, brain
+
+
+
+
+
+
+def continuous_maps_gamma_vs_lfp(to_plot, cmap, fs_dir):
+    """
+    Generate a continuous fsaverage surface map comparing gamma and LFP responsiveness.
+
+    This function projects contact-level gamma and LFP responsiveness values onto the
+    fsaverage cortical surface using MNE nearest-sensor interpolation. Each signal-specific
+    map is thresholded and binarized, then combined into a categorical map encoding
+    whether each surface vertex is supported by LFP-only, gamma-only, or overlapping
+    gamma/LFP responsiveness.
+
+    The coding scheme is:
+    0 = no response
+    1 = LFP only
+    2 = gamma only
+    3 = gamma + LFP
+
+    Parameters
+    ----------
+    to_plot : pandas.DataFrame
+        Contact-level dataframe containing unique contact identifiers, fsaverage
+        coordinates, and gamma/LFP responsiveness columns.
+        Required columns are unique_ch_names, x_norm_fsav, y_norm_fsav, z_norm_fsav,
+        gamma, and lfp.
+    cmap : matplotlib colormap
+        Discrete colormap used to display gamma/LFP response categories.
+    fs_dir : str
+        FreeSurfer SUBJECTS_DIR containing the fsaverage subject and source space.
+
+    Returns
+    -------
+    stc_all : mne.SourceEstimate
+        Categorical source estimate encoding LFP-only, gamma-only, and overlapping
+        gamma/LFP responsiveness.
+    brain : mne.viz.Brain
+        MNE Brain visualization object.
+    """
+
+    # Convert fsaverage contact coordinates from millimeters to meters for MNE.
+    ch_pos = {
+        c.unique_ch_names: c[['x_norm_fsav', 'y_norm_fsav', 'z_norm_fsav']].values / 1000
+        for ix, c in to_plot.iterrows()
+    }
+
+    # Build an MNE montage in fsaverage MRI coordinates.
+    mont = mne.channels.make_dig_montage(ch_pos, coord_frame='mri')
+    mont.add_estimated_fiducials('fsaverage')
+
+    # Create an MNE info object matching the contact montage.
+    info = mne.create_info(
+        ch_names=mont.ch_names,
+        ch_types=['seeg'] * len(mont.ch_names),
+        sfreq=1000
+    )
+    info.set_montage(mont)
+
+    # Load the fsaverage source space used for surface interpolation.
+    src = mne.read_source_spaces(
+        op.join(fs_dir, 'fsaverage', 'bem', "fsaverage-ico-5-src.fif")
+    )
+
+    # Project gamma responsiveness onto the cortical surface and binarize it.
+    evo_gamma = mne.EvokedArray(to_plot['gamma'].values.reshape(-1, 1), info)
+
+    stc_gamma = mne.stc_near_sensors(
+        evo_gamma,
+        trans="fsaverage",
+        subject="fsaverage",
+        subjects_dir=fs_dir,
+        src=src,
+        surface="pial",
+        mode="weighted",
+        distance=0.015,
+    )
+
+    stc_gamma.data = np.where(stc_gamma.data < 0.2, 0, 1)
+
+    # Project LFP responsiveness onto the cortical surface and binarize it.
+    evo_lfp = mne.EvokedArray(to_plot['lfp'].values.reshape(-1, 1), info)
+
+    stc_lfp = mne.stc_near_sensors(
+        evo_lfp,
+        trans="fsaverage",
+        subject="fsaverage",
+        subjects_dir=fs_dir,
+        src=src,
+        surface="pial",
+        mode="weighted",
+        distance=0.015,
+    )
+
+    stc_lfp.data = np.where(stc_lfp.data < 0.2, 0, 1)
+
+    # Combine binary LFP and gamma maps into a single categorical map.
+    combined_bin = (
+        stc_lfp.data.astype(int) * 1 +
+        stc_gamma.data.astype(int) * 2
+    )
+
+    # Store the combined gamma/LFP map as a SourceEstimate.
+    stc_all = mne.SourceEstimate(
+        combined_bin,
+        vertices=stc_gamma.vertices,
+        tmin=stc_gamma.tmin,
+        tstep=stc_gamma.tstep,
+        subject=stc_gamma.subject
+    )
+
+    # Plot categorical gamma/LFP map on the semi-inflated fsaverage surface.
+    brain = stc_all.plot(
+        surface="pial_semi_inflated",
+        cortex='white',
+        hemi="split",
+        colormap=cmap,
+        colorbar=True,
+        clim=dict(kind="value", lims=[0, 1.5, 3]),
+        subjects_dir=fs_dir,
+        size=(500, 500),
+        smoothing_steps='nearest',
+        time_viewer=False,
+        transparent=True,
+        background='w',
+        views=['lateral', 'medial']
+    )
+
+    return stc_all, brain
+
+
+
+
+
+
+def quickflat_with_atlas(
+    vertex_or_vdat,
+    subject=None,
+    atlas='HCPMMP1',
+    subjects_dir=None,
+    with_curvature=True,
+    with_colorbar=False,
+    atlas_color='k',
+    atlas_lw=0.25,
+    atlas_alpha=0.35,
+    atlas_smooth_iter=2,
+    figsize=None,
+    show_labels=False,
+    label_filter=None,
+    label_color='k',
+    label_size=6,
+    label_alpha=0.8,
+    label_zorder=20,
+    label_outline=True,
+):
+    """
+    Render a pycortex quickflat visualization with atlas boundaries and optional labels.
+
+    This function extends pycortex.quickflat by overlaying cortical parcellation
+    contours (e.g., HCPMMP1 or FreeSurfer atlases) on the flattened fsaverage surface.
+    It also supports optional annotation of region names directly on the flatmap.
+
+    Parameters
+    ----------
+    vertex_or_vdat : cortex.Vertex or array-like
+        Input data. Can be a pycortex Vertex object (e.g., Vertex, VertexRGB)
+        or a 1D array of values defined on the cortical surface.
+    subject : str, optional
+        Subject identifier (required if passing a raw array).
+    atlas : str, optional
+        Atlas/parcellation name. Supports 'HCPMMP1' (Glasser) or any FreeSurfer
+        annotation (e.g., 'aparc', 'aparc.a2009s').
+    subjects_dir : str, optional
+        FreeSurfer SUBJECTS_DIR, required for atlas loading.
+    with_curvature : bool, optional
+        Whether to show cortical curvature in the background.
+    with_colorbar : bool, optional
+        Whether to display the colorbar.
+    atlas_color : str or tuple, optional
+        Color of atlas boundaries.
+    atlas_lw : float, optional
+        Line width of atlas contours.
+    atlas_alpha : float, optional
+        Transparency of atlas contours.
+    atlas_smooth_iter : int, optional
+        Number of Chaikin smoothing iterations for contour lines.
+    figsize : tuple, optional
+        Figure size.
+    show_labels : bool, optional
+        Whether to display atlas region names.
+    label_filter : str or list, optional
+        Filter for labels (regex string or list of substrings).
+    label_color : str, optional
+        Text color for labels.
+    label_size : int, optional
+        Font size for labels.
+    label_alpha : float, optional
+        Transparency for labels.
+    label_zorder : int, optional
+        Z-order for labels.
+    label_outline : bool, optional
+        Whether to draw a white outline around text labels.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The rendered quickflat figure with atlas overlays.
+    """
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+    import matplotlib.patheffects as pe
+    import mne
+    import cortex
+    import re
+
+    # -------------------- helpers --------------------
+    def _label_boundary_segments(polys, flatpts2, label_vertices):
+        """Extract boundary edges of a label on the flat surface."""
+        in_label = np.zeros(len(flatpts2), dtype=bool)
+        in_label[np.asarray(label_vertices, dtype=int)] = True
+
+        tris = polys
+        in_tri = in_label[tris]
+
+        edges = np.stack(
+            [tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]],
+            axis=1
+        ).reshape(-1, 2)
+
+        in_edge = np.stack(
+            [in_tri[:, [0, 1]], in_tri[:, [1, 2]], in_tri[:, [2, 0]]],
+            axis=1
+        ).reshape(-1, 2)
+
+        boundary = (in_edge.sum(axis=1) == 1)
+        bedges = edges[boundary]
+        bedges = np.sort(bedges, axis=1)
+        bedges = np.unique(bedges, axis=0)
+
+        return flatpts2[bedges]
+
+    def _chaikin(polyline, n_iter=2):
+        """Smooth polyline using Chaikin subdivision."""
+        p = np.asarray(polyline, float)
+        if p.shape[0] < 3:
+            return p
+
+        for _ in range(n_iter):
+            Q = 0.75 * p[:-1] + 0.25 * p[1:]
+            R = 0.25 * p[:-1] + 0.75 * p[1:]
+            p = np.vstack([
+                Q[0],
+                np.column_stack((R[:-1], Q[1:])).reshape(-1, 2),
+                R[-1]
+            ])
+        return p
+
+    def _keep_label(name):
+        """Filter labels based on substring or regex."""
+        if label_filter is None:
+            return True
+        if isinstance(label_filter, str):
+            return re.search(label_filter, name) is not None
+        return any(s in name for s in label_filter)
+
+    # -------------------- input handling --------------------
+    tname = type(vertex_or_vdat).__name__
+    tmod = type(vertex_or_vdat).__module__
+
+    if hasattr(vertex_or_vdat, "subject") and ("Vertex" in tname) and tmod.startswith("cortex"):
+        vtx = vertex_or_vdat
+        if subject is None:
+            subject = vertex_or_vdat.subject
+    else:
+        arr = np.asarray(vertex_or_vdat).squeeze()
+        if arr.ndim != 1:
+            raise ValueError(f"Input must be 1D after squeeze, got shape={arr.shape}")
+        if subject is None:
+            raise ValueError("You must specify `subject` when passing a raw array.")
+        vtx = cortex.Vertex(arr, subject)
+
+    # -------------------- base quickflat --------------------
+    fig = cortex.quickflat.make_figure(
+        vtx,
+        with_curvature=with_curvature,
+        with_colorbar=with_colorbar,
+        with_rois=False
+    )
+
+    if figsize is not None:
+        fig.set_size_inches(*figsize)
+
+    ax = plt.gca()
+
+    # -------------------- flat surfaces --------------------
+    (lflatpts, lpolys), (rflatpts, rpolys) = cortex.db.get_surf(subject, "flat", nudge=True)
+
+    lflat2 = lflatpts[:, :2] if lflatpts.shape[1] > 2 else lflatpts
+    rflat2 = rflatpts[:, :2] if rflatpts.shape[1] > 2 else rflatpts
+
+    # -------------------- atlas loading --------------------
+    if atlas.upper() in ("HCPMMP1", "HCP-MMP1", "GLASSER", "HCP"):
+        if subjects_dir is None:
+            raise ValueError("HCPMMP1 requires subjects_dir.")
+        mne.datasets.fetch_hcp_mmp_parcellation(subjects_dir=subjects_dir, verbose=False)
+        parc = "HCPMMP1"
+    else:
+        parc = atlas
+
+    labels_lh = mne.read_labels_from_annot('fsaverage', parc=parc, hemi='lh', subjects_dir=subjects_dir)
+    labels_rh = mne.read_labels_from_annot('fsaverage', parc=parc, hemi='rh', subjects_dir=subjects_dir)
+
+    # -------------------- plotting --------------------
+    def add_hemi(labels, polys, flat2, hemi_prefix):
+        polylines = []
+
+        for lab in labels:
+            if len(lab.vertices) == 0:
+                continue
+
+            name = lab.name
+            if not _keep_label(name):
+                continue
+
+            # Contours
+            segs = _label_boundary_segments(polys, flat2, lab.vertices)
+            for s in segs:
+                polylines.append(_chaikin(s, atlas_smooth_iter) if atlas_smooth_iter else s)
+
+            # Label text
+            if show_labels:
+                pts = flat2[np.asarray(lab.vertices, int)]
+                if pts.size == 0:
+                    continue
+
+                x, y = np.nanmedian(pts[:, 0]), np.nanmedian(pts[:, 1])
+                txt = ax.text(
+                    x, y,
+                    name.replace(f"-{hemi_prefix}", ""),
+                    color=label_color,
+                    fontsize=label_size,
+                    alpha=label_alpha,
+                    ha='center',
+                    va='center',
+                    zorder=label_zorder
+                )
+
+                if label_outline:
+                    txt.set_path_effects([pe.withStroke(linewidth=2, foreground="white")])
+
+        if polylines:
+            lc = LineCollection(
+                polylines,
+                colors=atlas_color,
+                linewidths=atlas_lw,
+                alpha=atlas_alpha,
+                zorder=10,
+                capstyle='round',
+                joinstyle='round'
+            )
+            ax.add_collection(lc)
+
+    add_hemi(labels_lh, lpolys, lflat2, "lh")
+    add_hemi(labels_rh, rpolys, rflat2, "rh")
+
+    return fig

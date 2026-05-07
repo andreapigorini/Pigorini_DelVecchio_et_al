@@ -1437,3 +1437,329 @@ def remove_stim_artifact(epo, win=0.0125, size=5, plot=False, kind='spline'):
     epo._data = d
 
     return epo
+
+
+
+
+
+
+def print_crossmodal_per_area(A, S, V, all_subj_coords, name=""):
+    """
+    Summarize cross-modal responsive contacts by cortical area.
+
+    This function computes the anatomical distribution of contacts responding to more
+    than one sensory modality. Given the sets of acoustic-, somatosensory-, and
+    visual-responsive contacts, it calculates pairwise and trimodal overlaps and reports
+    their counts for each cortical area.
+
+    Parameters
+    ----------
+    A : set
+        Set of acoustic-responsive contact identifiers.
+    S : set
+        Set of somatosensory-responsive contact identifiers.
+    V : set
+        Set of visual-responsive contact identifiers.
+    all_subj_coords : pandas.DataFrame
+        Contact-level dataframe containing subject IDs, channel names, lobes,
+        cortical areas, and optionally unique contact identifiers.
+    name : str, optional
+        Analysis label used in printed output.
+
+    Returns
+    -------
+    area_table : pandas.DataFrame
+        Area-wise table containing pairwise and trimodal overlap counts.
+    tot_cont : dict
+        Dictionary containing total overlap counts across all cortical areas.
+    """
+
+    # Ensure that a subject-specific unique contact identifier is available.
+    if 'unique_ch_names' not in all_subj_coords.columns:
+        all_subj_coords = all_subj_coords.copy()
+        all_subj_coords['unique_ch_names'] = (
+            all_subj_coords['subj'].astype(str) + '_' +
+            all_subj_coords['ch_name'].astype(str)
+        )
+
+    # Build a contact-to-area lookup table.
+    map_area = all_subj_coords[['unique_ch_names', 'lobe', 'area']].drop_duplicates()
+
+    def _area_count(uid_set):
+        """
+        Count the number of contacts in a given set within each cortical area.
+        """
+
+        if not uid_set:
+            return pd.Series(dtype=int)
+
+        df_u = pd.DataFrame({'unique_ch_names': list(uid_set)})
+        merged = df_u.merge(map_area, on='unique_ch_names', how='left')
+
+        return merged['area'].value_counts()
+
+    # Compute pairwise and trimodal overlaps.
+    AS = (A & S) if (len(A) and len(S)) else set()
+    AV = (A & V) if (len(A) and len(V)) else set()
+    SV = (S & V) if (len(S) and len(V)) else set()
+    ASV = (A & S & V) if (len(A) and len(S) and len(V)) else set()
+
+    # Count overlap contacts per cortical area.
+    cnt_AS = _area_count(AS)
+    cnt_AV = _area_count(AV)
+    cnt_SV = _area_count(SV)
+    cnt_ASV = _area_count(ASV)
+
+    # Collect all areas containing at least one overlapping contact.
+    areas_all = set(cnt_AS.index) | set(cnt_AV.index) | set(cnt_SV.index) | set(cnt_ASV.index)
+
+    # Build the area-wise overlap table.
+    area_table = pd.DataFrame({'Area': sorted(list(areas_all))})
+
+    area_table = area_table.merge(cnt_AS.rename('A∩S'), left_on='Area', right_index=True, how='left')
+    area_table = area_table.merge(cnt_AV.rename('A∩V'), left_on='Area', right_index=True, how='left')
+    area_table = area_table.merge(cnt_SV.rename('S∩V'), left_on='Area', right_index=True, how='left')
+    area_table = area_table.merge(cnt_ASV.rename('A∩S∩V'), left_on='Area', right_index=True, how='left')
+
+    # Replace missing values with zero and enforce integer counts.
+    area_table = area_table.fillna(0).astype({
+        'A∩S': int,
+        'A∩V': int,
+        'S∩V': int,
+        'A∩S∩V': int
+    })
+
+    # Compute global overlap totals.
+    tot_cont = {
+        'A∩S': area_table['A∩S'].sum(),
+        'A∩V': area_table['A∩V'].sum(),
+        'S∩V': area_table['S∩V'].sum(),
+        'A∩S∩V': area_table['A∩S∩V'].sum()
+    }
+
+    # Append total row.
+    total_row = pd.DataFrame([{'Area': 'Total', **tot_cont}])
+    area_table = pd.concat([area_table, total_row], ignore_index=True)
+
+    # Sort areas by their maximum overlap count, keeping the total row at the bottom.
+    area_table_non_total = area_table[area_table['Area'] != 'Total']
+
+    order_vals = area_table_non_total[['A∩S', 'A∩V', 'S∩V', 'A∩S∩V']].max(axis=1)
+
+    area_table_non_total = (
+        area_table_non_total
+        .assign(_sort=order_vals)
+        .sort_values(by=['_sort', 'Area'], ascending=[False, True])
+        .drop(columns=['_sort'])
+        .reset_index(drop=True)
+    )
+
+    # Re-append total row at the end.
+    area_table = pd.concat(
+        [area_table_non_total, area_table[area_table['Area'] == 'Total']],
+        ignore_index=True
+    )
+
+    # Print the area-wise overlap table.
+    print(f"\nContacts responding to two or three modalities (counts) per area — {name}:")
+    print(area_table.to_string(index=False))
+
+    return area_table, tot_cont
+
+
+
+
+
+
+def compute_ccep_connectivity(path_sess, df_sub, sub, stim_bip, path_conn_save, resp_gamma_lfp_ch):
+    """
+    Compute CCEP-based effective connectivity from one bipolar SPES stimulation session.
+
+    This function loads cleaned cortico-cortical evoked potentials (CCEPs) elicited by
+    single-pulse electrical stimulation, z-scores each recorded channel relative to the
+    pre-stimulus baseline, and extracts early and late response metrics. The early N1
+    response, measured between 10 and 30 ms after stimulation, is used as an index of
+    putative monosynaptic effective connectivity. Results are saved together with the
+    full CCEP data and the response class of the stimulated contact.
+
+    Parameters
+    ----------
+    path_sess : str
+        Path to the stimulation session folder containing CCEP files.
+    df_sub : pandas.DataFrame
+        Subject-level contact dataframe containing channel names and gamma/LFP response
+        classifications.
+    sub : str
+        Subject identifier.
+    stim_bip : str
+        Name of the stimulated bipolar contact pair.
+    path_conn_save : str
+        Output directory where CCEP connectivity results are saved.
+    resp_gamma_lfp_ch : str or int
+        Response class of the stimulated contact, typically indicating whether the
+        stimulated site is gamma-responsive, LFP-only, or unresponsive.
+
+    Returns
+    -------
+    None
+        Saves a pickle file containing CCEP metrics, the z-scored Evoked object,
+        and the response class of the stimulated contact.
+    """
+
+    # Define the expected cleaned CCEP file for the current bipolar stimulation session.
+    fname_ccep = op.join(path_sess, 'Bipolar', 'evoked_autoclean.mat')
+
+    if os.path.exists(fname_ccep):
+
+        # Parse the stimulated bipolar channel name.
+        root = stim_bip.split('-')
+
+        if len(root[1].split("'")) > 1:
+            ch_name = root[0] + '-' + root[1].split("'")[1]
+        else:
+            ch_name = root[0] + '-' + root[1][1:]
+
+        # Load CCEP data, time vector, and recorded channel labels.
+        ccep_base = read_mat(fname_ccep)
+        fname_times = op.join(path_sess, 'Ts.mat')
+        ccep_times = read_mat(fname_times)['Ts']
+        ccep_ch = ccep_base['EVOKED']['labels']
+
+        # Retrieve channels marked as bad by the preprocessing pipeline.
+        ccep_bads = [
+            ccep_base['EVOKED']['labels'][ix]
+            for ix, i in enumerate(ccep_base['EVOKED']['bad_channels'])
+            if i == 1
+        ]
+
+        # Create an MNE Evoked object from z-scored CCEP data.
+        info = mne.create_info(ccep_ch, 1000, ch_types=['seeg'] * len(ccep_ch))
+        ccep = ccep_base['EVOKED']['data']
+
+        # Z-score each channel relative to the pre-stimulus baseline.
+        med = np.nanmean(ccep[:, ccep_times < -20], axis=1, keepdims=1)
+        std = np.nanstd(ccep[:, ccep_times < -20], axis=1, keepdims=1)
+        zscore = (ccep - med) / std
+
+        ccep = mne.EvokedArray(zscore, info, tmin=ccep_times[0] / 1000)
+
+        # Mark bad channels and exclude contacts with indices above 18.
+        ccep_bads = ccep_bads + [c for c in ccep_ch if int(c.split('-')[-1]) > 18]
+        ccep.info['bads'] = ccep_bads
+
+        ccep.drop_channels([c for c in ccep_ch if int(c.split('-')[-1]) > 18])
+
+        ch_drop_ix = [ix for ix, c in enumerate(ccep.ch_names) if c in ccep_bads]
+        n_ccep_ch = len(ccep.ch_names)
+
+        # Extract early N1 response metrics between 10 and 30 ms.
+        half_win = 5
+        early_crop = ccep.copy().crop(0.01, 0.03)
+        early_data = abs(early_crop.get_data())
+
+        early_pk = early_data.argmax(1)
+        early_latency = np.array([early_crop.times[ep] for ep in early_pk])
+        early_latency[ch_drop_ix] = np.nan
+
+        pk_value = np.array([
+            early_crop.get_data()[r, early_pk[r]]
+            for r in range(0, n_ccep_ch)
+        ])
+        pk_value[ch_drop_ix] = np.nan
+
+        # Compute the mean absolute response around the early peak.
+        start_early = early_pk - half_win
+        start_early[start_early < 0] = 0
+
+        end_early = early_pk + half_win
+        end_early[end_early > early_data.shape[1]] = early_data.shape[1]
+
+        early_resp = np.array([
+            early_data[ch, start_early[ch]:end_early[ch]].mean()
+            for ch, idx in enumerate(ccep.ch_names)
+        ])
+        early_resp[ch_drop_ix] = np.nan
+
+        # Extract late CCEP response metrics between 80 and 500 ms.
+        late_crop = ccep.copy().crop(0.08, 0.5)
+        late_data = abs(late_crop.get_data())
+
+        late_pk = late_data.argmax(1)
+        late_latency = np.array([late_crop.times[ep] for ep in late_pk])
+        late_latency[ch_drop_ix] = np.nan
+
+        # Compute the mean absolute response around the late peak.
+        start_late = late_pk - half_win
+        start_late[start_late < 0] = 0
+
+        end_late = late_pk + half_win
+        end_late[end_late > late_data.shape[1]] = late_data.shape[1]
+
+        late_resp = np.array([
+            late_data[ch, start_late[ch]:end_late[ch]].mean()
+            for ch, idx in enumerate(ccep.ch_names)
+        ])
+        late_resp[ch_drop_ix] = np.nan
+
+        # Store the full z-scored CCEP data.
+        conn_ccep_data = ccep
+
+        # Build a channel-level connectivity table.
+        conn_ccep_val = pd.DataFrame(
+            columns=[
+                'ch_name_bip',
+                'ch_name',
+                'conn',
+                'n1_peak',
+                'n1_auc',
+                'n1_lat',
+                'n2_auc',
+                'n2_lat'
+            ]
+        )
+
+        conn_ccep_val['ch_name_bip'] = ccep.ch_names
+
+        # Convert bipolar channel names to monopolar contact names used in the main dataframe.
+        conn_ccep_val['ch_name'] = (
+            conn_ccep_val['ch_name_bip']
+            .str.split('-')
+            .str[0]
+            .str.replace(r"^([A-Z]'+?|\w)(\d{1})$", r"\1_0\2", regex=True)
+            .str.replace(r"^([A-Z]'+?|\w)(\d{2,})$", r"\1_\2", regex=True)
+        )
+
+        # Add early and late CCEP response metrics.
+        conn_ccep_val['n1_peak'] = pk_value
+        conn_ccep_val['n1_auc'] = early_resp
+
+        # Define effective connectivity based on suprathreshold early N1 response.
+        conn_ccep_val['conn'] = (conn_ccep_val['n1_auc'] > 5).astype(int)
+
+        conn_ccep_val['n1_lat'] = early_latency
+        conn_ccep_val['n2_auc'] = late_resp
+        conn_ccep_val['n2_lat'] = late_latency
+
+        # Append gamma/LFP response classification of each recorded contact.
+        conn_ccep_val = conn_ccep_val.merge(
+            df_sub[['ch_name', 'gamma_lfp']],
+            on='ch_name',
+            how='left'
+        )
+
+        # Store the response class of the stimulated contact.
+        resp_stim_cont = resp_gamma_lfp_ch
+
+        # Save connectivity table, full CCEP data, and stimulated-contact class.
+        with open(op.join(path_conn_save, sub + '_' + stim_bip + '_conn_ccep.pkl'), 'wb') as f:
+            pickle.dump(
+                {
+                    'conn_ccep_val': conn_ccep_val,
+                    'conn_ccep_data': conn_ccep_data,
+                    'resp_stim_cont': resp_stim_cont
+                },
+                f
+            )
+
+    else:
+        print(fname_ccep + ' does not exist')
