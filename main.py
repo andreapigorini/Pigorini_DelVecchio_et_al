@@ -1728,8 +1728,3 @@ for b in band:
 
 # STATISTICAL ANALYSIS for wPLI
 # to be RUN in R using stats_wpli_conn.R, which loads table_connectivity_all_lobes_beta.csv &  table_connectivity_all_lobes_gamma.csv
-
-
-
-
-
