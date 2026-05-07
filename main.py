@@ -1721,10 +1721,5 @@ for b in band:
     subj_stk = pd.DataFrame.from_records(records)
     subj_stk.to_csv(op.join(path_results, f"table_connectivity_all_lobes_{b}.csv"), index=False)
 
-
-
-
-
-
 # STATISTICAL ANALYSIS for wPLI
 # to be RUN in R using stats_wpli_conn.R, which loads table_connectivity_all_lobes_beta.csv &  table_connectivity_all_lobes_gamma.csv
