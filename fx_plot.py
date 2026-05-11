@@ -1,23 +1,8 @@
-from pymatreader import read_mat
-import os
-from itcfpy.process import remove_stim_artifact
-from itcfpy.spatial import make_bip_lists, mni2fsav_coords
-from scipy.stats import ttest_ind
-from scipy import stats
-from statsmodels.stats.multitest import multipletests
-import pickle
 import pandas as pd
 import os.path as op
 import numpy as np
 import mne
-import cortex
 import matplotlib.pyplot as plt
-from matplotlib import colors as mcolors
-from cortex.polyutils import Surface
-from itcfpy.spatial import find_closest_vert
-from scipy.sparse import csr_matrix
-from mne.stats import permutation_cluster_1samp_test
-from functools import reduce
 import seaborn as sns
 
 
