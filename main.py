@@ -34,13 +34,13 @@ import pyvista as pv
 # =============================================================================
 
 # Base directory containing the full project dataset.
-path_base = '/home/andrea/data/Pigorini_DelVecchio_et_al/'  # please download the data from DOI:
+path_base = ''  # please download the data from DOI:
 
 # Directory containing imaging resources used for anatomical reconstruction and plotting.
-path_imaging = '/home/andrea/imaging' # contains imaging data for plotting
+path_imaging = op.join(path_base, 'imaging') # contains imaging data for plotting
 
 # Input and output folders.
-path_original_data = op.join(path_base, 'per-seeg')
+path_original_data = op.join(path_base, 'data')
 path_results = op.join(path_base, 'results')
 
 # FreeSurfer SUBJECTS_DIR containing template surfaces and anatomical files.
@@ -92,7 +92,7 @@ for subj in subj_list:
         subj_cond_fname = subj + '_task-' + cond
 
         # Import epoched SEEG data from the BIDS-derived files.
-        path_original_data = op.join(path_base, 'per-seeg')
+        path_original_data = op.join(path_base, 'data')
         imported_data = import_data(op.join(path_original_data, subj + '/seeg/'), subj_cond_fname)
 
         # Compute gamma-band time-frequency responses and sample-wise statistics.
@@ -249,7 +249,7 @@ surface_fsav(all_subj_coords_plot_all, 'ez', subjects_dir=subjects_dir, surf='in
 # distribution for Figure S1, and removes them from subsequent analyses.
 
 # Load pathological contacts.
-ez_contacts = pd.read_csv(path_base + 'per-seeg/bad_contacts.csv')
+ez_contacts = pd.read_csv(path_base + 'data/bad_contacts.csv')
 
 # Standardize column names.
 ez_contacts = ez_contacts.rename(columns={'subj_id': 'subj', 'ez_ch': 'ch_name'})
@@ -888,7 +888,7 @@ cmaps = ['Greys', 'Greys', 'Greys']
 for cond, subj, ch, cmap in zip(conds, subjs, chs, cmaps):
 
     # Load the selected subject-condition epoch file.
-    path_original_data = op.join(path_base, 'per-seeg')
+    path_original_data = op.join(path_base, 'data')
     subj_cond_fname = subj + '_task-' + cond + 'task_run-01'
     imported_data = import_data(op.join(path_original_data, subj + '/seeg/'), subj_cond_fname)
 
@@ -1314,7 +1314,7 @@ for subj in subj_list:
 
         # Load original epoched data for the current subject-condition.
         subj_cond_fname = subj + '_task-' + cond
-        path_original_data = op.join(path_base, 'per-seeg')
+        path_original_data = op.join(path_base, 'data')
         imported_data = import_data(op.join(path_original_data, subj + '/seeg/'), subj_cond_fname)
 
         # Load precomputed gamma statistical masks for the same subject-condition.
