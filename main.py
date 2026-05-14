@@ -44,11 +44,11 @@ path_original_data = op.join(path_base, 'data')
 path_results = op.join(path_base, 'results')
 
 # FreeSurfer SUBJECTS_DIR containing template surfaces and anatomical files.
-subjects_dir = op.join(path_imaging, 'fs_subjects')  # contains a MNI125 surface
+subjects_dir = op.join(path_imaging, 'fs_subjects')  # path where fsaverage is installed (freesurfer)
 
-# Transform files used to project MNI coordinates onto fsaverage.
-fname_affine = op.join(path_imaging,'misc/mni2fsav/mni2fsav_0GenericAffine.mat')  # to be changed
-fname_warp = op.join(path_imaging, 'misc/mni2fsav/mni2fsav_1InverseWarp.nii.gz')  # to be changed
+# Transform files used to project MNI coordinates onto fsaverage. To use this Transform ANT is needed (https://github.com/ANTsX/ANTs)
+fname_affine = op.join(path_imaging, 'misc/mni2fsav/mni2fsav_0GenericAffine.mat')
+fname_warp = op.join(path_imaging, 'misc/mni2fsav/mni2fsav_1InverseWarp.nii.gz')
 
 # Load subject identifiers from the BIDS participants file.
 subj_list = pd.read_csv(op.join(path_original_data, 'participants.tsv'), sep='\t')['participant_id']
@@ -118,6 +118,9 @@ for subj in subj_list:
 # This block imports all SEEG contact coordinates, converts them to the coordinate
 # spaces required for surface visualization, assigns anatomical labels, and samples
 # each contact along the Margulies principal cortical gradient.
+# IMPORTANT: This section depends on FreeSurfer and ANTs, which must be installed
+# on a supported Unix-like operating system. Alternatively, this step can be skipped
+# by loading the precomputed all_subj_coords.csv file provided with the dataset.
 
 # Initialize the contact-level coordinate table.
 all_subj_coords = pd.DataFrame(columns=['subj', 'ez', 'ch_name', 'hemis', 'x_norm_mri', 'y_norm_mri', 'z_norm_mri'])
