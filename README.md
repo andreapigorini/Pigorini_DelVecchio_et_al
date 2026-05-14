@@ -1,6 +1,6 @@
 # Pigorini_DelVecchio_et_al
 Code for data analysis for
-The boundaries of cortical recruitment during simple conscious perception
+The boundaries of cortical recruitment during conscious perception of simple stimuli
 by
 Andrea Pigorini*, Maria Del Vecchio*, Ezequiel P. Mikulan, Flavia Zauli, Alessandra Calcagno, Davide Albertini, Simone Russo, Piergiorgio D’Orio, Ivana Sartori, Pietro Avanzini@, Marcello Massimini@
 
